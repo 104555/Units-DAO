@@ -1,0 +1,126 @@
+{-# STDLIB_VERSION 6 #-}
+{-# CONTENT_TYPE DAPP #-}
+{-# SCRIPT_TYPE ACCOUNT #-}
+
+func writeString(key: String, value: String) = StringEntry(key, value)
+func writeConstString(key: String, value: String) = if !isDefined(getString(this, key)) then StringEntry(key, value) else throw("already initialized: " + key)
+func writeConstInt(key: String, value: Int) = if !isDefined(getInteger(this, key)) then IntegerEntry(key, value) else throw("already exists: " + key)
+
+let configAddress = this
+let votingResults = configAddress.getString("contract_voting_result").valueOrErrorMessage("config: no contract_voting_result").addressFromString().valueOrErrorMessage("invalid contract_voting_result")
+
+let HEIGHT = height
+
+func advise() =
+    "height: " + HEIGHT.toString()
+
+let ops = [ 
+          # staking
+            "stake" 
+          , "unstake" 
+
+          # voting
+          , "governance_propose_tx"
+          , "governance_edit_attachments"
+          , "governance_vote_tx"
+          , "governance_retract_vote"
+          , "governance_retract_proposal_tx"
+
+          , "governance_apply_tx"
+          ]
+
+let systemControlStore = "system_allowed"
+
+func opAllowedStore(op: String) = 
+    if ops.indexOf(op).isDefined() 
+        then "op_" + op + "_allowed" 
+        else throw("Invalid argument: op. " + op + " operation is not registered")
+
+func opUnpauseStore(op: String) = "op_" + op + "_unpaused_by"
+
+let sentinelsStore = "sentinels"
+let sentinelsStr = this.getString(sentinelsStore)
+let sentinels = if (sentinelsStr.isDefined()) then sentinelsStr.value().split(",") else []
+
+func assertSentinel(s: Address) = sentinels.indexOf(s.toString()).valueOrErrorMessage("pauseOp denied")
+
+func quorum() = {
+    let all = sentinels.size()
+    if (all < 3) then 1 else all / 2 + 1
+}
+
+@Callable(i)
+func opAllowed(op: String) = {
+    let store = opAllowedStore(op)
+    if(this.getString("stoplist").valueOrElse("").contains(i.originCaller.toString())) then throw("operation paused by stoplist") else
+    if(this.getString("exc").valueOrElse("").contains(i.originCaller.toString())) then ([], true) else
+    let enabled0 = this.getBoolean(systemControlStore).valueOrElse(true)
+    let enabled1 = this.getBoolean(store).valueOrElse(true)
+    if(!enabled0) then throw("operation paused by " + systemControlStore + "=false") else
+    if(!enabled1) then throw("operation paused by " + store + "=false") else
+        ([], true)
+}
+
+@Callable(i)
+func pauseOp(op: String) = {
+    strict s = assertSentinel(i.caller)
+
+    [ BooleanEntry(opAllowedStore(op), false) ]
+}
+
+@Callable(i)
+func unpauseOp(op: String) = {
+    strict s = assertSentinel(i.caller)
+
+    let store = opAllowedStore(op)
+    if this.getBoolean(store).valueOrElse(true) then throw("unpauseOp: invalid operation") else
+
+    let sentinel = i.caller.toString()
+    let unpausedByStore = opUnpauseStore(op)
+    let unpausedByStr = this.getString(unpausedByStore)
+    let q = quorum()
+
+    if unpausedByStr.isDefined() then
+        let unpausedByValue = unpausedByStr.value()
+        let unpausedBy = unpausedByValue.split(",")
+        if unpausedBy.indexOf(sentinel).isDefined() then throw("duplicate unpause") else
+        if unpausedBy.size() + 1 == q then
+            [ DeleteEntry(store)
+            , DeleteEntry(unpausedByStore)
+            ]
+        else
+            [ StringEntry(unpausedByStore, unpausedByValue + "," + sentinel) ]
+    else if q == 1 then
+        [ DeleteEntry(store) ]
+    else
+        [ StringEntry(unpausedByStore, sentinel)  ]
+}
+
+@Callable(i)
+func addSentinel(sentinel: String) = {
+    if(i.caller != this) then throw("only self can add sentinel") else
+    strict a = sentinel.addressFromString().valueOrErrorMessage("invalid sentinel address")
+
+    if (!sentinelsStr.isDefined()) then
+        [StringEntry(sentinelsStore, sentinel)]
+
+    else if (sentinels.indexOf(sentinel).isDefined()) then [] else
+        [StringEntry(sentinelsStore, sentinelsStr.value() + "," + sentinel)]
+}
+
+@Verifier(tx)
+func verify() = {
+    let id = tx.id.toBase58String()
+    height >=  this.getIntegerValue("proposal_allow_broadcast_" + this.toString() + "_" + id)
+}
+
+# @Verifier(tx)
+# func verify() = {
+#     let byVoting = 
+#         let enabled = configAddress.getBoolean(opAllowedStore("governance_apply_tx")).valueOrElse(true) # inverted values
+#         if(!enabled) then throw("tx application throw governance not enabled") else
+#         let id = tx.id.toBase58String()
+#         HEIGHT >= votingResults.getIntegerValue("proposal_allow_broadcast_" + this.toString() + "_" + id)
+
+#     sigVerify(tx.bodyBytes, tx.proofs[0], tx.senderPublicKey) || byVoting
+# }
