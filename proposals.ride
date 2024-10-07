@@ -1,0 +1,350 @@
+{-# STDLIB_VERSION 5 #-}
+{-# CONTENT_TYPE DAPP #-}
+{-# SCRIPT_TYPE ACCOUNT #-}
+
+func throwIf(condition: Boolean, error: String) = if condition then throw(error) else true
+func nonEmptyString(s: String, key: String) = if s.size() <= 0 then throw("empty string: " + key) else true
+func writeString(key: String, value: String) = if value.size() <= 0 then throw("empty string: " + key) else StringEntry(key, value)
+# func writeBinary(key: String, value: ByteVector) = BinaryEntry(key, value)
+func writeInt(key: String, value: Int) =
+    if(value < 0)
+        then throw("writing negative value " + value.toString() + " for key " + key)
+    else IntegerEntry(key, value)
+func writeConstString(key: String, value: String) = if !isDefined(getString(this, key)) && nonEmptyString(value, key) then StringEntry(key, value) else throw("already initialized: " + key)
+func writeConstInt(key: String, value: Int) = if !isDefined(getInteger(this, key)) then IntegerEntry(key, value) else throw("already exists: " + key)
+func changeBy(key: String, value: Int) = key.writeInt(this.getInteger(key).valueOrElse(0) + value)
+func asInt(value: Any) = match value {
+  case int: Int => int
+  case _ => throw("wrong type, expected: Int")
+}
+let configAddressStore = "config"
+let configAddress = this.getString(configAddressStore)
+  .valueOrErrorMessage("no config")
+  .addressFromString().valueOrErrorMessage("invalid config address")
+
+let voting = configAddress.getString("contract_voting_result").valueOrErrorMessage("no contract_voting_result").addressFromString().valueOrErrorMessage("invalid contract_voting_result")
+let staking = configAddress.getString("contract_staking").valueOrErrorMessage("no contract_staking").addressFromString().valueOrErrorMessage("invalid contract_staking")
+let userdata = configAddress.getString("contract_user_data").valueOrErrorMessage("no contract_user_data").addressFromString().valueOrErrorMessage("invalid contract_user_data")
+
+let HEIGHT = height
+
+# @Eval
+func advise() = "height: " + HEIGHT.toString()
+
+let BASE = 1000
+
+func opAllowed(op: String) = {
+    strict s = configAddress.invoke("opAllowed",[ op ],[]) 
+    true
+}
+
+func addressStore(id: String) = "proposal_address_" + id
+func heightStore(id: String) = "proposal_height_" + id
+func votingStartStore(id: String) = "proposal_votingstart_" + id
+func votingEndStore(id: String) = "proposal_votingend_" + id
+func byStore(id: String) =  "proposal_by_" + id
+func descriptionStore(id: String) = "proposal_description_" + id
+func titleStore(id: String) = "proposal_title_" + id
+func payloadStore(id: String) = "proposal_payload_" + id
+func maxSnapStore(id: String) = "proposal_max_snap_" + id
+func totalYesStore(id: String) =  "proposal_yes_" + id
+func totalNoStore(id: String) =  "proposal_no_" + id
+
+func userYesStore(user: String, id: String) =  "proposal_yes_user_" + id + "_" + user
+func userNoStore(user: String, id: String) = "proposal_no_user_" + id + "_" + user
+func userLastProposeHeightStore(user: String) = "propose_lastheight_" + user
+
+func userYes(user: String, id: String) = userdata.getInteger(userYesStore(user, id)).valueOrElse(0)
+func userNo(user: String, id: String) = userdata.getInteger(userNoStore(user, id)).valueOrElse(0)
+func userLastProposeHeight(user: String) = userdata.getInteger(userLastProposeHeightStore(user)).valueOrElse(-1)
+
+let thisAddress = this.toString()
+
+let userProposeDelay = configAddress.getInteger(thisAddress + "_user_propose_delay").valueOrErrorMessage("_user_propose_delay is not defined")
+let quorumRatio = configAddress.getInteger(thisAddress + "_proposal_quorum_ratio").valueOrErrorMessage("_proposal_quorum_ratio is not defined")
+let quorumMinUnit = configAddress.getInteger(thisAddress + "_proposal_quorum_min").valueOrErrorMessage("_proposal_quorum_min is not defined")  
+func proposalQuorumStore(txid: String) =  "proposal_quorum_ratio_" + txid
+func proposalQuorumMinStore(txid: String) =  "proposal_quorum_min_" + txid
+
+let passedRatio = 
+  let ratio = configAddress.getInteger(thisAddress + "_proposal_passed_ratio").valueOrErrorMessage("_proposal_passed_ratio is not defined")
+  if ratio <= 0 then throw("invalid _proposal_passed_ratio") else
+  ratio
+
+func proposalpassedRatioStore(txid: String) =  "proposal_passed_ratio_" + txid
+
+let proposalMinRequired = configAddress.getInteger(thisAddress + "_proposal_min_required").valueOrErrorMessage("_proposal_min_required is not defined")
+let votingStartOffset = configAddress.getInteger(thisAddress + "_proposal_votingstart_offset").valueOrErrorMessage("_proposal_votingstart_offset is not defined")
+let votingEndOffset = configAddress.getInteger(thisAddress + "_proposal_votingend_offset").valueOrErrorMessage("_proposal_votingend_offset is not defined")
+
+# Voting value
+func userStake(user: String) = staking.invoke("userStake", [user], []).asInt() 
+
+
+func proposalExists(txId: String) = match this.getInteger(heightStore(txId)) {
+    case start: Int => true
+    case _ => false
+}
+
+func proposalOnVoting(txId: String) = {
+  let nonExistErr = "proposal doesn't exist"
+  if !proposalExists(txId) then throw(nonExistErr) else
+
+  let votingStart = this.getInteger(votingStartStore(txId)).valueOrErrorMessage(nonExistErr)
+  let votingEnd = this.getInteger(votingEndStore(txId)).valueOrErrorMessage(nonExistErr)
+
+  if votingStart > HEIGHT then throw("voting not started yet, discussion is in progress, voting will start at block " + votingStart.toString() + ", now it's " + HEIGHT.toString()) else
+  if votingEnd < HEIGHT then throw("voting ended at block " + votingEnd.toString() + ", now it's " + HEIGHT.toString()) else
+
+  true
+}
+
+func proposalBeforeVoting(txId: String) = {
+  let nonExistErr = "proposal doesn't exist"
+  if !proposalExists(txId) then throw(nonExistErr) else
+
+  let votingStart = this.getInteger(votingStartStore(txId)).valueOrErrorMessage(nonExistErr)
+  if HEIGHT >= votingStart  then throw("voting start is already happened") else
+
+  true
+}
+
+
+# total votes
+func totalStake() = staking.invoke("totalStake", [], []).asInt()
+
+func quorum(txId: String) = proposalQuorumStore(txId).getInteger().valueOrElse(quorumRatio)
+ 
+func canBroadcast(id: String, yesInc: Int, noInc: Int) = {
+    let votesYes = getInteger("proposal_yes_" + id).valueOrElse(0) + yesInc
+    let votesNo = getInteger("proposal_no_" + id).valueOrElse(0) + noInc
+
+    let total = totalStake()
+
+    let ratio = id.proposalpassedRatioStore().getIntegerValue()
+    let totalVotes = votesYes + votesNo
+    let hasQuorum = totalVotes * BASE / total >= quorum(id)
+    let hasPassed = votesYes * BASE / totalVotes >= ratio
+
+    let hasQuarumAbs = totalVotes >= id.proposalQuorumMinStore().getIntegerValue()
+
+    hasQuorum && hasPassed 
+    && hasQuarumAbs
+}
+
+# @Eval
+func adviseProposalUserVotes(txId: String, user: String) = {
+  let yes = userYes(user, txId)
+  let no = userNo(user, txId)
+  let txAddress = addressStore(txId).getString().valueOrErrorMessage("proposal address not found")
+  
+  "height: " + HEIGHT.toString() +
+  ", vote_yes: " + yes.toString() +
+  ", vote_no: " +  no.toString()
+}
+
+# @Eval
+func adviseProposal(txId: String) = {
+  let proposalHeight  = getInteger(heightStore(txId)).valueOrErrorMessage("no proposal")
+  let votingStart  = getInteger(votingStartStore(txId)).valueOrErrorMessage("no proposal")
+  let votingEnd  = getInteger(votingEndStore(txId)).valueOrErrorMessage("no proposal")
+  let votesYes = getInteger(totalYesStore(txId)).valueOrElse(0)
+  let votesNo = getInteger(totalNoStore(txId)).valueOrElse(0)
+  let maxSnap = getInteger(maxSnapStore(txId)).valueOrElse(0)
+  
+  
+  let totalVotes = votesYes + votesNo
+  let quorumMin = txId.proposalQuorumMinStore().getIntegerValue()
+  let ratio = txId.proposalpassedRatioStore().getIntegerValue()
+  let hasQuarumAbs = totalVotes >= quorumMin
+  let q = quorum(txId)
+  let hasQuorum = if totalVotes > 0
+    then ((totalVotes * BASE / maxSnap) >= q)
+      && hasQuarumAbs
+    else false
+  let hasPassed = if totalVotes > 0
+    then (votesYes * BASE / totalVotes) >= ratio
+    else false
+
+  let inBlockchainHeight = transactionHeightById(txId.fromBase58String()).valueOrElse(0)
+
+  let status =
+    if HEIGHT < votingStart then "discussion" else
+    if HEIGHT <= votingEnd then "voting" else
+    if !hasQuorum then "noQuorum" else
+    if !hasPassed then "votingFailed" else
+    if inBlockchainHeight > 0 then "inBlockchain" else
+    "waitingForTx" 
+
+    "height: " + HEIGHT.toString() +
+    ", proposal_id: " + txId +
+    ", proposal_title: " + txId.titleStore().getStringValue() +
+    ", proposal_address: " + addressStore(txId).valueOrErrorMessage("no address") +
+    ", proposal_status: " + status +
+    ", proposal_by: " + this.getString(byStore(txId)).valueOrErrorMessage("no proposal") +
+    ", proposal_height: " + proposalHeight.toString() +
+    ", proposal_txheight: " + inBlockchainHeight.toString() +
+    ", proposal_votingstart: " + votingStart.toString() +
+    ", proposal_votingend: " + votingEnd.toString() +
+    ", proposal_max: " + maxSnap.toString() +
+    ", vote_yes: " + votesYes.toString() +
+    ", vote_no: " +  votesNo.toString() +
+    ", proposal_quorum: " +  q.toString() +
+    ", proposal_quorum_min: " + quorumMin.toString() +
+    ", proposal_passed_ratio: " + ratio.toString() + # todo: add to UI
+    ", proposal_description: " + txId.descriptionStore().getStringValue() +
+    ", proposal_payload: " + txId.payloadStore().getStringValue()
+    
+}
+
+func broadcastHeight(txId: String) = votingEndStore(txId).getIntegerValue() + 1
+
+func setResult(txAddress: String, txId: String, result: Boolean) = voting.invoke("setResult", [ txAddress, txId, result, broadcastHeight(txId)  ], [])
+func setMaxSnap(txId: String) =  IntegerEntry(maxSnapStore(txId), totalStake())
+
+func lock(user: String, txId: String) = { 
+    let votingEnd =  txId.votingEndStore().getIntegerValue()
+    let unlock = votingEnd + 1
+    staking.invoke("lockFor", [ user,  unlock ], [])
+}
+
+
+@Callable(i)
+func propose(address: String, txId: String, title: String, description: String, payload: String) = {
+  strict checks = opAllowed("governance_propose_tx")
+
+  let user = i.caller.toString()
+  let gv = userStake(user)
+  if(gv < proposalMinRequired) then throw(
+      "not enough staked units to make proposal." +
+      " Minimum required = " + proposalMinRequired.toString() +
+      ", actual: = " + gv.toString()) else
+
+  let last = userLastProposeHeight(user)
+  if last > -1 && last + userProposeDelay > HEIGHT then throw(
+    "can't propose too often, last proroposal height: "
+    + last.toString() + ", blocks to wait: "
+    + (last + userProposeDelay - HEIGHT).toString()) else
+
+  let votingEnds = HEIGHT + votingEndOffset
+
+  strict l = userdata.invoke("write", [ userLastProposeHeightStore(user), HEIGHT  ], [])
+
+  [ heightStore(txId).writeConstInt(HEIGHT)
+  , txId.setMaxSnap()
+  , votingStartStore(txId).writeConstInt(HEIGHT + votingStartOffset)
+  , votingEndStore(txId).writeConstInt(votingEnds)
+  , byStore(txId).writeConstString(i.caller.toString())
+  , addressStore(txId).writeConstString(address)
+  , descriptionStore(txId).writeString(description)
+  , payloadStore(txId).writeString(payload)
+  , titleStore(txId).writeConstString(title)
+
+  , IntegerEntry(proposalQuorumStore(txId), quorumRatio)
+  , IntegerEntry(proposalQuorumMinStore(txId), quorumMinUnit)
+  , IntegerEntry(proposalpassedRatioStore(txId), passedRatio)
+  ]
+}
+
+@Callable(i)
+func edit(txId: String, title: String, description: String) = {
+  strict checks = opAllowed("governance_edit_attachments") && proposalBeforeVoting(txId)
+  let user = i.caller.toString()
+  let by = this.getString(byStore(txId)).valueOrErrorMessage("proposal doesn't exist")
+  if by != user then throw("only owner can edit proposal attachments e.g. title, description") else
+  [ titleStore(txId).writeString(title)
+  , descriptionStore(txId).writeString(description)
+  ]
+}
+
+@Callable(i)
+func voteYes(txId: String) = {
+  strict checks = opAllowed("governance_vote_tx") && proposalOnVoting(txId)
+  let user = i.caller.toString()
+
+  if(userNo(user, txId) > 0) then throw("already voted against, please retract your vote first") else
+  let yesDelta = userStake(user) - userYes(user, txId)
+
+  strict l = user.lock(txId)
+  let txAddress = addressStore(txId).getString().valueOrErrorMessage("proposal address not found")
+  let result = canBroadcast(txId, yesDelta , 0)
+
+  strict s = setResult(txAddress, txId, result) 
+  strict y = userdata.invoke("changeBy", [ userYesStore(user, txId), yesDelta  ], [])
+
+  [ txId.setMaxSnap()
+  , totalYesStore(txId).changeBy(yesDelta)
+  ]
+}
+
+@Callable(i)
+func voteNo(txId: String) = {
+  strict checks = opAllowed("governance_vote_tx") && proposalOnVoting(txId)
+  let user = i.caller.toString()
+  if(userYes(user, txId) > 0) then throw("already voted for, please retract your vote first") else
+  let noDelta = userStake(user) - userNo(user, txId)
+   
+  strict l = user.lock(txId)
+  let txAddress = addressStore(txId).getString().valueOrErrorMessage("proposal address not found")
+  let result = canBroadcast(txId, 0 , noDelta)
+
+  strict s = setResult(txAddress, txId, result) 
+  strict n = userdata.invoke("changeBy", [ userNoStore(user, txId), noDelta  ], [])
+
+  [ txId.setMaxSnap()
+  , totalNoStore(txId).changeBy(noDelta)
+  ]
+}
+
+@Callable(i)
+func retract(txId: String) = {
+  strict checks = opAllowed("governance_retract_vote") && proposalOnVoting(txId)
+  let user = i.caller.toString()
+  let yes = userYes(user, txId)
+  let no = userNo(user, txId)
+  let txAddress = addressStore(txId).getString().valueOrErrorMessage("proposal address not found")
+  let result = canBroadcast(txId, -yes , -no)
+  
+  strict s = setResult(txAddress, txId, result) 
+  strict y = userdata.invoke("delete", [ userYesStore(user, txId) ], [])
+  strict n = userdata.invoke("delete", [ userNoStore(user, txId) ], [])
+
+  # todo: lock / unlock?
+
+  [ totalYesStore(txId).changeBy(-yes)
+  , totalNoStore(txId).changeBy(-no)
+  ]
+}
+
+
+@Callable(i)
+func retractProposal(txId: String) = {
+  strict checks = opAllowed("governance_retract_proposal_tx") && proposalBeforeVoting(txId)
+
+  let by = this.getString(byStore(txId)).valueOrErrorMessage("proposal doesn't exist")
+  let user = i.caller.toString()
+  if by != user then throw("only owner can retract proposal") else
+
+  strict l = userdata.invoke("delete", [ userLastProposeHeightStore(user) ], [])
+
+  [ DeleteEntry(heightStore(txId))
+  , DeleteEntry(votingStartStore(txId))
+  , DeleteEntry(votingEndStore(txId))
+  , DeleteEntry(byStore(txId))
+  , DeleteEntry(maxSnapStore(txId))
+  , DeleteEntry(totalYesStore(txId))
+  , DeleteEntry(totalNoStore(txId))
+  , DeleteEntry(addressStore(txId))
+  , DeleteEntry(titleStore(txId))
+  , DeleteEntry(payloadStore(txId))
+  , DeleteEntry(proposalQuorumStore(txId)) 
+  , DeleteEntry(proposalQuorumMinStore(txId)) 
+  , DeleteEntry(descriptionStore(txId)) 
+  ]
+}
+
+@Verifier(tx)
+func verify() = {
+    let id = tx.id.toBase58String()
+    height >=  this.getIntegerValue("proposal_allow_broadcast_" + this.toString() + "_" + id)
+}
