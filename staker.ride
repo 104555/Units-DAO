@@ -1,0 +1,136 @@
+{-# STDLIB_VERSION 6 #-}
+{-# CONTENT_TYPE DAPP #-}
+{-# SCRIPT_TYPE ACCOUNT #-}
+
+func writeConstString(key: String, value: String) = if !isDefined(getString(this, key)) then StringEntry(key, value) else throw("already initialized: " + key)
+func writeInt(key: String, value: Int) =
+    if(value < 0)
+        then throw("writing negative value " + value.toString() + " for key " + key)
+    else IntegerEntry(key, value)
+
+func changeBy(key: String, value: Int) = key.writeInt(this.getInteger(key).valueOrElse(0) + value)
+
+let configAddressStore = "config"
+let config = this.getString(configAddressStore).valueOrErrorMessage("config address not found").addressFromString().valueOrErrorMessage("invalid config address")
+let vouting = config.getString("contract_voting").valueOrErrorMessage("contract_voting not set").addressFromString().valueOrErrorMessage("invalid contract_voting address")
+
+func allowed(op: String) =  config.invoke("opAllowed",[ op ],[]) 
+
+let unitsAssetIdStr = config
+  .getString("units_asset")
+  .valueOrErrorMessage("units_asset not found")
+
+let unitsAssetId = unitsAssetIdStr.fromBase58String()
+
+let stakingAddressesStore = "stakingAddresses"
+let stakingAddresses = config.getString(stakingAddressesStore).valueOrElse("")
+
+func stakedStore(address: String) = "staked_" + address
+func lockBlock(address: String) = "block_lock_" + address
+func unlockBlock(address: String) = "block_unlock_" + address
+func staked(address: String) =  this.getInteger(stakedStore(address)).valueOrElse(0)
+let totalStakedStore =  "staked_total"
+let totalStaked = this.getInteger(totalStakedStore).valueOrElse(0)
+
+let minLockTime = config.getInteger(this.toString() + "_min_lock_blocks").valueOrErrorMessage("_min_lock_blocks not set")
+
+
+let HEIGHT = height
+
+# @Eval
+func advise() = 
+    "height: " + HEIGHT.toString() +
+    ", total_staked: " + totalStaked.toString()
+
+# @Eval
+func adviseUser(account: String) = {
+    let userStaked = account.staked()
+
+    "height: " + HEIGHT.toString() +
+    ", account: " + account +
+    ", staked: " + userStaked.toString() +
+    if userStaked == 0 then ", lock_block: -1, unlock_block: -1" else
+    ", lock_block: " + account.lockBlock().getIntegerValue().toString() +
+    ", unlock_block: " + account.unlockBlock().getIntegerValue().toString()
+}
+
+
+
+@Callable(i)
+func stake() = {
+    strict a = allowed("stake")
+    if i.payments.size() != 1 then throw("single payment is allowed") else
+    if i.payments[0].assetId != unitsAssetId then throw("invalid payment asset") else
+
+    let user = i.caller.toString()
+    let userStaked = stakedStore(user)
+    let additionalStake = i.payments[0].amount
+
+    let currentUnlock = user.unlockBlock().getInteger().valueOrElse(0)
+    let unlock = HEIGHT + minLockTime
+    
+    [ userStaked.changeBy(additionalStake)
+    , IntegerEntry(user.lockBlock(), HEIGHT)
+
+    , totalStakedStore.changeBy(additionalStake)
+    ]
+    ++
+    ( if unlock <= currentUnlock then [] else 
+      [ IntegerEntry(user.unlockBlock(), unlock) ]
+    )
+}
+
+@Callable(i)
+func unstake(amount: Int) = {
+    strict a = allowed("unstake")
+    if amount <= 0 then throw("amount should be positive") else
+
+    let user = i.caller.toString()
+    let userStaked = user.stakedStore()
+    let stakedAmount = this.getIntegerValue(userStaked)
+
+    if stakedAmount <= 0 then throw("nothing staked") else
+
+    let unlockHeight = user.unlockBlock().getIntegerValue()
+    if (unlockHeight > HEIGHT) then throw("locked till block " + unlockHeight.toString() ) else
+   
+    [ totalStakedStore.changeBy(-amount) 
+    , ScriptTransfer(i.caller, amount, unitsAssetId)
+    ]
+    ++
+    ( if stakedAmount == amount then
+        [ DeleteEntry(userStaked)
+        , DeleteEntry(user.lockBlock())
+        , DeleteEntry(user.unlockBlock())
+        ]
+      else
+        [ userStaked.changeBy(-amount)
+        ]
+    )
+}
+
+@Callable(i)
+func lockFor(address: String, unlock: Int) = {
+    if i.caller != vouting then throw("denied") else
+
+    let currentUnlock = address.unlockBlock().getInteger().valueOrElse(0)
+    
+    if unlock <= currentUnlock then [] else 
+    [ IntegerEntry(address.unlockBlock(), unlock) ]
+}
+
+@Callable(i)
+func userStake(address:String) = {
+    ([], staked(address))
+}
+
+@Callable(i)
+func totalStake() = {
+    ([], totalStaked)
+}
+
+@Verifier(tx)
+func verify() = {
+    let id = tx.id.toBase58String()
+    height >=  this.getIntegerValue("proposal_allow_broadcast_" + this.toString() + "_" + id)
+}
