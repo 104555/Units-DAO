@@ -1,0 +1,35 @@
+{-# STDLIB_VERSION 6 #-}
+{-# CONTENT_TYPE DAPP #-}
+{-# SCRIPT_TYPE ACCOUNT #-}
+
+func writeConstString(key: String, value: String) = if !isDefined(getString(this, key)) then StringEntry(key, value) else throw("already initialized: " + key)
+
+let configAddressStore = "config"
+let config = this.getString(configAddressStore)
+    .valueOrErrorMessage("results: config address not found")
+    .addressFromString()
+    .valueOrErrorMessage("results: invalid config address")
+
+
+let voting = config.getString("contract_voting")
+    .valueOrErrorMessage("results: no contract_voting")
+    .addressFromString()
+    .valueOrErrorMessage("results: invalid contract_voting")
+
+
+@Callable(i)
+func setResult(address: String, txId: String, succeed: Boolean, broadcastHeight: Int) = {
+    if i.caller != voting then throw("denied") else 
+
+    let store = "proposal_allow_broadcast_" + address + "_" + txId
+    if succeed then 
+        [ IntegerEntry(store, broadcastHeight) ]
+    else
+        [ DeleteEntry(store) ]
+}
+
+@Verifier(tx)
+func verify() = {
+    let id = tx.id.toBase58String()
+    height >=  this.getIntegerValue("proposal_allow_broadcast_" + this.toString() + "_" + id)
+}
