@@ -12,7 +12,7 @@ func changeBy(key: String, value: Int) = key.writeInt(this.getInteger(key).value
 
 let configAddressStore = "config"
 let config = this.getString(configAddressStore).valueOrErrorMessage("config address not found").addressFromString().valueOrErrorMessage("invalid config address")
-let vouting = config.getString("contract_voting").valueOrErrorMessage("contract_voting not set").addressFromString().valueOrErrorMessage("invalid contract_voting address")
+let voting = config.getString("contract_voting").valueOrErrorMessage("contract_voting not set").addressFromString().valueOrErrorMessage("invalid contract_voting address")
 
 func allowed(op: String) =  config.invoke("opAllowed",[ op ],[]) 
 
@@ -111,7 +111,7 @@ func unstake(amount: Int) = {
 
 @Callable(i)
 func lockFor(address: String, unlock: Int) = {
-    if i.caller != vouting then throw("denied") else
+    if i.caller != voting then throw("denied") else
 
     let currentUnlock = address.unlockBlock().getInteger().valueOrElse(0)
     
@@ -131,6 +131,11 @@ func totalStake() = {
 
 @Verifier(tx)
 func verify() = {
-    let id = tx.id.toBase58String()
-    height >=  this.getIntegerValue("proposal_allow_broadcast_" + this.toString() + "_" + id)
+      func opAllowedStore(op: String) = "op_" + op + "_allowed"
+      let enabled = config.getBoolean(opAllowedStore("self_governance_apply_tx")).valueOrElse(true) # inverted values
+      if(!enabled) then throw("tx application throw governance not enabled") else
+
+      let id = tx.id.toBase58String()
+      let votingResults = config.getString("contract_voting_result").valueOrErrorMessage("staking: no contract_voting_result").addressFromString().valueOrErrorMessage("invalid contract_voting_result")
+      height >= votingResults.getIntegerValue("proposal_allow_broadcast_" + this.toString() + "_" + id)
 }
