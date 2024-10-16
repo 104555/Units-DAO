@@ -5,11 +5,12 @@
 func throwIf(condition: Boolean, error: String) = if condition then throw(error) else true
 func nonEmptyString(s: String, key: String) = if s.size() <= 0 then throw("empty string: " + key) else true
 func writeString(key: String, value: String) = if value.size() <= 0 then throw("empty string: " + key) else StringEntry(key, value)
-# func writeBinary(key: String, value: ByteVector) = BinaryEntry(key, value)
+
 func writeInt(key: String, value: Int) =
     if(value < 0)
         then throw("writing negative value " + value.toString() + " for key " + key)
     else IntegerEntry(key, value)
+
 func writeConstString(key: String, value: String) = if !isDefined(getString(this, key)) && nonEmptyString(value, key) then StringEntry(key, value) else throw("already initialized: " + key)
 func writeConstInt(key: String, value: Int) = if !isDefined(getInteger(this, key)) then IntegerEntry(key, value) else throw("already exists: " + key)
 func changeBy(key: String, value: Int) = key.writeInt(this.getInteger(key).valueOrElse(0) + value)
@@ -18,13 +19,13 @@ func asInt(value: Any) = match value {
   case _ => throw("wrong type, expected: Int")
 }
 let configAddressStore = "config"
-let configAddress = this.getString(configAddressStore)
+let config = this.getString(configAddressStore)
   .valueOrErrorMessage("no config")
   .addressFromString().valueOrErrorMessage("invalid config address")
 
-let voting = configAddress.getString("contract_voting_result").valueOrErrorMessage("no contract_voting_result").addressFromString().valueOrErrorMessage("invalid contract_voting_result")
-let staking = configAddress.getString("contract_staking").valueOrErrorMessage("no contract_staking").addressFromString().valueOrErrorMessage("invalid contract_staking")
-let userdata = configAddress.getString("contract_user_data").valueOrErrorMessage("no contract_user_data").addressFromString().valueOrErrorMessage("invalid contract_user_data")
+let voting = config.getString("contract_voting_result").valueOrErrorMessage("no contract_voting_result").addressFromString().valueOrErrorMessage("invalid contract_voting_result")
+let staking = config.getString("contract_staking").valueOrErrorMessage("no contract_staking").addressFromString().valueOrErrorMessage("invalid contract_staking")
+let userdata = config.getString("contract_user_data").valueOrErrorMessage("no contract_user_data").addressFromString().valueOrErrorMessage("invalid contract_user_data")
 
 let HEIGHT = height
 
@@ -32,9 +33,12 @@ let HEIGHT = height
 func advise() = "height: " + HEIGHT.toString()
 
 let BASE = 1000
+let HundredPercent = BASE
+let FiftyPercent = BASE / 2
+let ThirtyPercent = 300
 
 func opAllowed(op: String) = {
-    strict s = configAddress.invoke("opAllowed",[ op ],[]) 
+    strict s = config.invoke("opAllowed",[ op ],[]) 
     true
 }
 
@@ -60,22 +64,26 @@ func userLastProposeHeight(user: String) = userdata.getInteger(userLastProposeHe
 
 let thisAddress = this.toString()
 
-let userProposeDelay = configAddress.getInteger(thisAddress + "_user_propose_delay").valueOrErrorMessage("_user_propose_delay is not defined")
-let quorumRatio = configAddress.getInteger(thisAddress + "_proposal_quorum_ratio").valueOrErrorMessage("_proposal_quorum_ratio is not defined")
-let quorumMinUnit = configAddress.getInteger(thisAddress + "_proposal_quorum_min").valueOrErrorMessage("_proposal_quorum_min is not defined")  
+let userProposeDelay = config.getInteger(thisAddress + "_user_propose_delay").valueOrErrorMessage("_user_propose_delay is not defined")
+let quorumMinUnit = config.getInteger(thisAddress + "_proposal_quorum_min").valueOrErrorMessage("_proposal_quorum_min is not defined")  
 func proposalQuorumStore(txid: String) =  "proposal_quorum_ratio_" + txid
 func proposalQuorumMinStore(txid: String) =  "proposal_quorum_min_" + txid
 
+let quorumRatio = 
+  let quorum = config.getInteger(thisAddress + "_proposal_quorum_ratio").valueOrErrorMessage("_proposal_quorum_ratio is not defined")
+  if quorum < 1 || quorum > HundredPercent then ThirtyPercent else
+  quorum 
+
 let passedRatio = 
-  let ratio = configAddress.getInteger(thisAddress + "_proposal_passed_ratio").valueOrErrorMessage("_proposal_passed_ratio is not defined")
-  if ratio <= 0 then throw("invalid _proposal_passed_ratio") else
+  let ratio = config.getInteger(thisAddress + "_proposal_passed_ratio").valueOrErrorMessage("_proposal_passed_ratio is not defined")
+  if ratio < FiftyPercent || ratio > HundredPercent then FiftyPercent else
   ratio
 
 func proposalpassedRatioStore(txid: String) =  "proposal_passed_ratio_" + txid
 
-let proposalMinRequired = configAddress.getInteger(thisAddress + "_proposal_min_required").valueOrErrorMessage("_proposal_min_required is not defined")
-let votingStartOffset = configAddress.getInteger(thisAddress + "_proposal_votingstart_offset").valueOrErrorMessage("_proposal_votingstart_offset is not defined")
-let votingEndOffset = configAddress.getInteger(thisAddress + "_proposal_votingend_offset").valueOrErrorMessage("_proposal_votingend_offset is not defined")
+let proposalMinRequired = config.getInteger(thisAddress + "_proposal_min_required").valueOrErrorMessage("_proposal_min_required is not defined")
+let votingStartOffset = config.getInteger(thisAddress + "_proposal_votingstart_offset").valueOrErrorMessage("_proposal_votingstart_offset is not defined")
+let votingEndOffset = config.getInteger(thisAddress + "_proposal_votingend_offset").valueOrErrorMessage("_proposal_votingend_offset is not defined")
 
 # Voting value
 func userStake(user: String) = staking.invoke("userStake", [user], []).asInt() 
@@ -345,6 +353,11 @@ func retractProposal(txId: String) = {
 
 @Verifier(tx)
 func verify() = {
-    let id = tx.id.toBase58String()
-    height >=  this.getIntegerValue("proposal_allow_broadcast_" + this.toString() + "_" + id)
+      func opAllowedStore(op: String) = "op_" + op + "_allowed"
+      let enabled = config.getBoolean(opAllowedStore("self_governance_apply_tx")).valueOrElse(true) # inverted values
+      if(!enabled) then throw("tx application throw governance not enabled") else
+
+      let id = tx.id.toBase58String()
+      let votingResults = config.getString("contract_voting_result").valueOrErrorMessage("staking: no contract_voting_result").addressFromString().valueOrErrorMessage("invalid contract_voting_result")
+      height >= votingResults.getIntegerValue("proposal_allow_broadcast_" + this.toString() + "_" + id)
 }
