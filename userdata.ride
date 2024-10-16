@@ -2,7 +2,6 @@
 {-# CONTENT_TYPE DAPP #-}
 {-# SCRIPT_TYPE ACCOUNT #-}
 
-func writeConstString(key: String, value: String) = if !isDefined(getString(this, key)) then StringEntry(key, value) else throw("already initialized: " + key)
 func writeInt(key: String, value: Int) =
     if(value < 0)
         then throw("writing negative value " + value.toString() + " for key " + key)
@@ -10,11 +9,11 @@ func writeInt(key: String, value: Int) =
 
 
 let configAddressStore = "config"
-let configAddress = this.getString(configAddressStore)
+let config = this.getString(configAddressStore)
   .valueOrErrorMessage("userdata: no config")
   .addressFromString().valueOrErrorMessage("userdata: invalid config address")
 
-let voting = configAddress.getString("contract_voting").valueOrErrorMessage("no contract_voting").addressFromString().valueOrErrorMessage("invalid contract_voting")
+let voting = config.getString("contract_voting").valueOrErrorMessage("userdata: no contract_voting").addressFromString().valueOrErrorMessage("userdata: invalid contract_voting")
 
 
 @Callable(i)
@@ -35,11 +34,17 @@ func changeBy(key: String, delta: Int) = {
 func delete(key: String) = {
      if i.caller != voting then throw("denied") else
 
+     if !key.getInteger().isDefined() then [] else
     [ DeleteEntry(key) ]
 }
 
 @Verifier(tx)
 func verify() = {
-    let id = tx.id.toBase58String()
-    height >=  this.getIntegerValue("proposal_allow_broadcast_" + this.toString() + "_" + id)
+      func opAllowedStore(op: String) = "op_" + op + "_allowed"
+      let enabled = config.getBoolean(opAllowedStore("self_governance_apply_tx")).valueOrElse(true) # inverted values
+      if(!enabled) then throw("tx application throw governance not enabled") else
+
+      let id = tx.id.toBase58String()
+      let votingResults = config.getString("contract_voting_result").valueOrErrorMessage("userdata: no contract_voting_result").addressFromString().valueOrErrorMessage("invalid contract_voting_result")
+      height >= votingResults.getIntegerValue("proposal_allow_broadcast_" + this.toString() + "_" + id)
 }
